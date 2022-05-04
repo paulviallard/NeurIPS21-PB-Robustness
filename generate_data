@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# Author: Paul VIALLARD
+#
+# This file is licensed under the license found in the
+# LICENSE file in the root directory of this source tree.
+
+cd data/
+
+# We download the datasets 
+python generate_torchvision.py MNIST mnist.h5
+python generate_torchvision.py FashionMNIST fashion.h5
+
+# We flatten the inputs
+python get_flat.py mnist.h5 mnist.h5
+python get_flat.py fashion.h5 fashion.h5
+
+# We get only two labels for the multi-class datasets
+# and we transform the labels into -1/+1
+python get_2_label.py mnist.h5 mnist_1_7.h5 1 7
+python get_2_label.py mnist.h5 mnist_4_9.h5 4 9
+python get_2_label.py mnist.h5 mnist_5_6.h5 5 6
+
+python get_2_label.py fashion.h5 fashion_co_sh.h5 4 6
+python get_2_label.py fashion.h5 fashion_sa_bo.h5 5 9
+python get_2_label.py fashion.h5 fashion_to_pu.h5 0 2
+
+cd ../

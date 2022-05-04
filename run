@@ -1,0 +1,296 @@
+#!/usr/bin/env bash
+# Author: Guillaume VIDOT (AIRBUS SAS)
+#
+# This file is licensed under the license found in the
+# LICENSE file in the root directory of this source tree.
+
+# We assume that the run is sequential. (the prior must be computed before the posterior)
+# --------------------------------------------------------------------------- #
+# The Learning Parameters
+
+DATASET=$1
+
+# Model
+MODEL=forest_model
+SAMPLE_SIZE=25
+MASK=0.5
+DEPTH=2
+SIGNED=$2
+SIGNED_EXT=""
+if [[ "$SIGNED" == "True" ]] 
+then 
+  SIGNED_EXT="_signed"
+fi
+
+# Optimizer
+BATCH_SIZE=64
+EPOCH=2
+LR=0.01
+
+# Bound
+DELTA=0.05
+
+# Data split
+VAL=5000
+
+# Attack
+NORM=$3
+K=20 
+STEP=0.05 
+EPS_MAX=$4
+U_EPS_MAX=0.01 
+NB_NOISE=100
+
+# --------------------------------------------------------------------------- #
+
+OPT_ATTACK_nothing=""
+OPT_ATTACK_uniformnoisepgd="k=$K,step=$STEP,pgd_eps_max=$EPS_MAX,noise_eps_max=$U_EPS_MAX,lp_norm=\'$NORM\',min_clip=0,max_clip=1,random_init=True"
+OPT_ATTACK_uniformnoiseiterativefgsm="k=$K,step=$STEP,it_fgsm_eps_max=$EPS_MAX,noise_eps_max=$U_EPS_MAX,lp_norm='$NORM',min_clip=0,max_clip=1"
+OPT_ATTACK_uniformnoise="eps_max=$EPS_MAX,lp_norm=\'$NORM\',min_clip=0,max_clip=1"
+OPT_ATTACK_pgd="k=$K,step=$STEP,eps_max=$EPS_MAX,lp_norm='$NORM',min_clip=0,max_clip=1,random_init=True"
+OPT_ATTACK_iterativefgsm="k=$K,step=$STEP,eps_max=$EPS_MAX,lp_norm='$NORM',min_clip=0,max_clip=1"
+
+ATTACK_=("nothing" "uniformnoise" "uniformnoisepgd" "uniformnoiseiterativefgsm")
+
+ATTACK_BASELINE_=("nothing" "pgd" "iterativefgsm")
+
+# --------------------------------------------------------------------------- #
+# Learning the baseline
+echo "baseline"
+for ATTACK in "${ATTACK_BASELINE_[@]}"; do
+   OPT_ATTACK=OPT_ATTACK_${ATTACK}
+   SAVE="data=$DATASET/norm=${NORM}/defense=$ATTACK/eps-max=$EPS_MAX,u-eps-max=$U_EPS_MAX,step=$STEP,K=$K/batch=$BATCH_SIZE,epoch=$EPOCH,lr=$LR/baseline"
+   mkdir -p "data/model/$SAVE/"
+   mkdir -p "data/loss/$SAVE/"
+   python ./learn_model.py $DATASET $MODEL\
+     --attack=$ATTACK --opt-attack=${!OPT_ATTACK}\
+     --epoch=1 --val-epoch=$EPOCH --batch-size=$BATCH_SIZE --val-end=$VAL --train-start=$VAL --lr=$LR\
+     --metric=gibbs  --save=$SAVE/weights.pkl
+done
+
+# --------------------------------------------------------------------------- #
+# Learning the prior
+
+# sign(h) or h is the same when learning the prior 
+# --> the sign only impact the "prediction" of the model
+# The early stopping is based on the loss not the "prediction"
+# /!\ when generating the attack, we use the prediction and then be aware whe
+echo "prior"
+for ATTACK in "${ATTACK_[@]}"; do
+   OPT_ATTACK=OPT_ATTACK_${ATTACK}
+   SAVE="data=$DATASET/norm=${NORM}/defense=$ATTACK/eps-max=$EPS_MAX,u-eps-max=$U_EPS_MAX,step=$STEP,K=$K/batch=$BATCH_SIZE,epoch=$EPOCH,lr=$LR/prior"
+   mkdir -p "data/model/$SAVE/"
+   mkdir -p "data/loss/$SAVE/"
+   python ./learn_model.py $DATASET $MODEL\
+     --opt-model="signed=$SIGNED"\
+     --attack=$ATTACK --opt-attack=${!OPT_ATTACK}\
+     --epoch=1 --val-epoch=$EPOCH --batch-size=$BATCH_SIZE --val-end=$VAL --train-start=$VAL --lr=$LR\
+     --metric=gibbs  --save=$SAVE/weights.pkl
+done
+
+# --------------------------------------------------------------------------- #
+# Learning the posterior (boundth6 & boundth7tv)
+
+echo "posterior"
+METRIC_=("boundth6" "boundth7tv")
+
+for METRIC in "${METRIC_[@]}"; do
+  for ATTACK in "${ATTACK_[@]}"; do
+    OPT_ATTACK=OPT_ATTACK_${ATTACK}
+    echo ${!OPT_ATTACK}
+    LOAD_PRIOR="data=$DATASET/norm=${NORM}/defense=$ATTACK/eps-max=$EPS_MAX,u-eps-max=$U_EPS_MAX,step=$STEP,K=$K/batch=$BATCH_SIZE,epoch=$EPOCH,lr=$LR/prior"
+    SAVE_POST="data=$DATASET/norm=${NORM}/defense=$ATTACK/eps-max=$EPS_MAX,u-eps-max=$U_EPS_MAX,step=$STEP,K=$K/batch=$BATCH_SIZE,epoch=$EPOCH,lr=$LR/post/metric=$METRIC"
+    mkdir -p "data/model/$SAVE_POST/"
+    mkdir -p "data/loss/$SAVE_POST/"
+
+    python ./learn_model.py $DATASET $MODEL\
+      --opt-model="learn_post=True,sample_size=-1,signed=$SIGNED"\
+      --attack=$ATTACK --opt-attack=${!OPT_ATTACK}\
+      --epoch=1 --val-epoch=$EPOCH --batch-size=$BATCH_SIZE --train-end=$VAL --lr=$LR\
+      --metric=$METRIC --opt-metric="m=$VAL,delta=$DELTA,t=$EPOCH"\
+      --load=$LOAD_PRIOR/weights.pkl --save=$SAVE_POST/weights.pkl
+    done
+done
+
+# --------------------------------------------------------------------------- #
+
+OPT_ATTACK_NOISE_nothing=""
+OPT_ATTACK_NOISE_uniformnoisepgd="k=$K,step=$STEP,pgd_eps_max=$EPS_MAX,noise_eps_max=$U_EPS_MAX,lp_norm=\'$NORM\',min_clip=0,max_clip=1,random_init=True,n=$NB_NOISE"
+OPT_ATTACK_NOISE_uniformnoiseiterativefgsm="k=$K,step=$STEP,it_fgsm_eps_max=$EPS_MAX,noise_eps_max=$U_EPS_MAX,lp_norm='$NORM',min_clip=0,max_clip=1,n=$NB_NOISE"
+OPT_ATTACK_NOISE_uniformnoise="eps_max=$EPS_MAX,lp_norm='$NORM',min_clip=0,max_clip=1,n=$NB_NOISE"
+OPT_ATTACK_NOISE_pgd="k=$K,step=$STEP,eps_max=$EPS_MAX,lp_norm='$NORM',min_clip=0,max_clip=1,random_init=True"
+OPT_ATTACK_NOISE_iterativefgsm="k=$K,step=$STEP,eps_max=$EPS_MAX,lp_norm='$NORM',min_clip=0,max_clip=1"
+
+# --------------------------------------------------------------------------- #
+# Generating the attacks
+
+echo "attack prior"
+
+for ATTACK1 in "${ATTACK_[@]}"; do
+  for ATTACK2 in "${ATTACK_[@]}"; do
+    OPT_ATTACK=OPT_ATTACK_NOISE_${ATTACK2}
+    LOAD_PRIOR="data=$DATASET/norm=${NORM}/defense=$ATTACK1/eps-max=$EPS_MAX,u-eps-max=$U_EPS_MAX,step=$STEP,K=$K/batch=$BATCH_SIZE,epoch=$EPOCH,lr=$LR/prior"
+    SAVE_ATTACK="data=$DATASET/norm=${NORM}/defense=$ATTACK1/attack=$ATTACK2/eps-max=$EPS_MAX,u-eps-max=$U_EPS_MAX,step=$STEP,K=$K/batch=$BATCH_SIZE,epoch=$EPOCH,lr=$LR/nb-noise=${NB_NOISE}"
+    
+    mkdir -p "data/attack$SIGNED_EXT/$SAVE_ATTACK/"
+    
+    python ./generate_attack.py $DATASET train $SAVE_ATTACK/train $MODEL\
+      --opt-model=signed=$SIGNED\
+      --opt-attack=${!OPT_ATTACK}\
+      --end=$VAL --attack=${ATTACK2}\
+      --load=$LOAD_PRIOR/weights.pkl
+    python ./generate_attack.py $DATASET test $SAVE_ATTACK/test $MODEL\
+      --opt-model=signed=$SIGNED\
+      --attack=${ATTACK2}\
+      --opt-attack=${!OPT_ATTACK}\
+      --load=$LOAD_PRIOR/weights.pkl
+  done
+done
+
+# --------------------------------------------------------------------------- #
+# Generating the attacks for the original attacks
+
+echo "attack original"
+BOUND_=("boundth6" "boundth7tv")
+
+
+for ATTACK1 in "${ATTACK_[@]}"; do
+  for ATTACK2 in "${ATTACK_BASELINE_[@]}"; do
+    for BOUND in "${BOUND_[@]}"; do
+      OPT_ATTACK=OPT_ATTACK_NOISE_${ATTACK2}
+      LOAD_POST="data=$DATASET/norm=${NORM}/defense=$ATTACK1/eps-max=$EPS_MAX,u-eps-max=$U_EPS_MAX,step=$STEP,K=$K/batch=$BATCH_SIZE,epoch=$EPOCH,lr=$LR/post/metric=${BOUND}"
+      SAVE_ATTACK="data=$DATASET/norm=${NORM}/defense=$ATTACK1/attack=$ATTACK2/eps-max=$EPS_MAX,u-eps-max=$U_EPS_MAX,step=$STEP,K=$K/batch=$BATCH_SIZE,epoch=$EPOCH,lr=$LR/original"
+      mkdir -p "data/attack$SIGNED_EXT/$SAVE_ATTACK/"
+
+      python ./generate_attack.py $DATASET test $SAVE_ATTACK/test_${BOUND} $MODEL\
+        --opt-model=signed=$SIGNED\
+        --attack=${ATTACK2}\
+        --opt-attack=${!OPT_ATTACK}\
+        --load=$LOAD_POST/weights.pkl
+    done
+  done
+done
+
+# --------------------------------------------------------------------------- #
+# Generating the attacks for the baseline
+
+echo "attack baseline"
+
+for ATTACK1 in "${ATTACK_BASELINE_[@]}"; do
+  for ATTACK2 in "${ATTACK_BASELINE_[@]}"; do
+    LOAD="data=$DATASET/norm=${NORM}/defense=$ATTACK1/eps-max=$EPS_MAX,u-eps-max=$U_EPS_MAX,step=$STEP,K=$K/batch=$BATCH_SIZE,epoch=$EPOCH,lr=$LR/baseline"
+    SAVE_ATTACK="data=$DATASET/norm=${NORM}/defense=$ATTACK1/attack=$ATTACK2/eps-max=$EPS_MAX,u-eps-max=$U_EPS_MAX,step=$STEP,K=$K/batch=$BATCH_SIZE,epoch=$EPOCH,lr=$LR/baseline"
+    mkdir -p "data/attack/$SAVE_ATTACK/"
+    OPT_ATTACK=OPT_ATTACK_NOISE_${ATTACK2}
+    python ./generate_attack.py $DATASET test $SAVE_ATTACK/test $MODEL\
+        --attack=${ATTACK2} --opt-attack=${!OPT_ATTACK}\
+        --load=${LOAD}/weights.pkl
+  done
+done
+
+# --------------------------------------------------------------------------- #
+# Attacking the model (PAC-Bayes)
+
+echo "attack model"
+
+METRIC_boundth6=majorityvote
+METRIC_boundth7tv=majorityvotemax
+METRIC_boundth7=majorityvotemax
+BOUND_=("boundth6" "boundth7tv")
+
+for ATTACK1 in "${ATTACK_[@]}"; do
+  for ATTACK2 in "${ATTACK_[@]}"; do
+    for BOUND in "${BOUND_[@]}"; do
+
+      METRIC=METRIC_${BOUND}
+      LOAD_POST="data=$DATASET/norm=${NORM}/defense=$ATTACK1/eps-max=$EPS_MAX,u-eps-max=$U_EPS_MAX,step=$STEP,K=$K/batch=$BATCH_SIZE,epoch=$EPOCH,lr=$LR/post/metric=${BOUND}"
+      LOAD_ATTACK="data=$DATASET/norm=${NORM}/defense=$ATTACK1/attack=$ATTACK2/eps-max=$EPS_MAX,u-eps-max=$U_EPS_MAX,step=$STEP,K=$K/batch=$BATCH_SIZE,epoch=$EPOCH,lr=$LR/nb-noise=${NB_NOISE}"
+
+      SAVE_RESULT="data=$DATASET/norm=${NORM}/eps-max=$EPS_MAX,u-eps-max=$U_EPS_MAX,step=$STEP,K=$K/batch=$BATCH_SIZE,epoch=$EPOCH,lr=$LR/nb-noise=${NB_NOISE}"
+      
+      mkdir -p data/result$SIGNED_EXT/$SAVE_RESULT
+      EXPERIMENT_NAME=${DATASET}_${LR}_${ATTACK1}_${ATTACK2}_${EPS_MAX}_${NORM}_${NB_NOISE}
+    
+      python ./attack_model.py $LOAD_ATTACK/test $MODEL data/result$SIGNED_EXT/$SAVE_RESULT/${EXPERIMENT_NAME}_${!METRIC}.csv\
+        $EXPERIMENT_NAME ${!METRIC}\
+        --opt-model=sample_size=$SAMPLE_SIZE,init_prior=True,signed=$SIGNED\
+        --metric=${!METRIC} --load=$LOAD_POST/weights.pkl\
+        --attack=${ATTACK2}
+
+      python ./attack_model.py $LOAD_ATTACK/train $MODEL data/result$SIGNED_EXT/$SAVE_RESULT/${EXPERIMENT_NAME}_${BOUND}.csv\
+        $EXPERIMENT_NAME $BOUND\
+        --opt-model=sample_size=$SAMPLE_SIZE,init_prior=True,signed=$SIGNED\
+        --metric=$BOUND --opt-metric=m=$VAL,delta=$DELTA,t=$EPOCH\
+        --load=$LOAD_POST/weights.pkl\
+        --attack=${ATTACK2}
+
+    done
+  done
+done
+
+# We create the directory merge if it does not exists
+mkdir -p data/result$SIGNED_EXT/merge/bar/norm=${NORM}
+
+# We assume that between experiments we only change the norm and the dataset. 
+# Then "merge${SIGNED_EXT}_$DATASET_$NORM.csv" is a unique name.
+python ./merge_csv.py data/result$SIGNED_EXT/$SAVE_RESULT/ data/result$SIGNED_EXT/merge/bar/norm=${NORM}/merge${SIGNED_EXT}_${DATASET}_${NORM}.csv
+
+# --------------------------------------------------------------------------- #
+# Attacking the model (PAC-Bayes) with original attacks
+
+echo "attack model original"
+
+METRIC_boundth6=majorityvote
+METRIC_boundth7tv=majorityvotemax
+BOUND_=("boundth6" "boundth7tv")
+
+for ATTACK1 in "${ATTACK_[@]}"; do
+  for ATTACK2 in "${ATTACK_BASELINE_[@]}"; do
+    for BOUND in "${BOUND_[@]}"; do
+
+      METRIC=METRIC_${BOUND}
+      LOAD_POST="data=$DATASET/norm=${NORM}/defense=$ATTACK1/eps-max=$EPS_MAX,u-eps-max=$U_EPS_MAX,step=$STEP,K=$K/batch=$BATCH_SIZE,epoch=$EPOCH,lr=$LR/post/metric=${BOUND}"
+      LOAD_ATTACK="data=$DATASET/norm=${NORM}/defense=$ATTACK1/attack=$ATTACK2/eps-max=$EPS_MAX,u-eps-max=$U_EPS_MAX,step=$STEP,K=$K/batch=$BATCH_SIZE,epoch=$EPOCH,lr=$LR/original"
+
+      SAVE_RESULT="data=$DATASET/norm=${NORM}/eps-max=$EPS_MAX,u-eps-max=$U_EPS_MAX,step=$STEP,K=$K/batch=$BATCH_SIZE,epoch=$EPOCH,lr=$LR/original"
+      mkdir -p data/result$SIGNED_EXT/$SAVE_RESULT
+      EXPERIMENT_NAME=${DATASET}_${LR}_${ATTACK1}_${ATTACK2}_${EPS_MAX}_${NORM}_${NB_NOISE}
+
+      python ./attack_model.py $LOAD_ATTACK/test_${BOUND} $MODEL data/result$SIGNED_EXT/$SAVE_RESULT/${EXPERIMENT_NAME}_${!METRIC}.csv\
+        $EXPERIMENT_NAME ${!METRIC}\
+        --opt-model=sample_size=$SAMPLE_SIZE,init_prior=True,signed=$SIGNED\
+        --metric=${!METRIC} --load=$LOAD_POST/weights.pkl\
+        --attack=${ATTACK2}
+    done
+  done
+done
+
+# We assume that between experiments we only change the norm and the dataset. 
+# Then "merge_$DATASET_$NORM.csv" is a unique name.
+python ./merge_csv.py data/result$SIGNED_EXT/$SAVE_RESULT/ data/result$SIGNED_EXT/merge/bar/norm=${NORM}/merge${SIGNED_EXT}_${DATASET}_${NORM}.csv
+
+# --------------------------------------------------------------------------- #
+# Attacking the model (Baseline)
+echo "attack model baseline"
+METRIC_=("majorityvote" "majorityvotemax")
+for ATTACK1 in "${ATTACK_BASELINE_[@]}"; do
+  for ATTACK2 in "${ATTACK_BASELINE_[@]}"; do
+    for METRIC in "${METRIC_[@]}"; do
+      LOAD="data=$DATASET/norm=${NORM}/defense=$ATTACK1/eps-max=$EPS_MAX,u-eps-max=$U_EPS_MAX,step=$STEP,K=$K/batch=$BATCH_SIZE,epoch=$EPOCH,lr=$LR/baseline"
+      LOAD_ATTACK="data=$DATASET/norm=${NORM}/defense=$ATTACK1/attack=$ATTACK2/eps-max=$EPS_MAX,u-eps-max=$U_EPS_MAX,step=$STEP,K=$K/batch=$BATCH_SIZE,epoch=$EPOCH,lr=$LR/baseline"
+      SAVE_RESULT="data=$DATASET/norm=${NORM}/eps-max=$EPS_MAX,u-eps-max=$U_EPS_MAX,step=$STEP,K=$K/batch=$BATCH_SIZE,epoch=$EPOCH,lr=$LR/baseline"
+      mkdir -p data/result/$SAVE_RESULT
+      EXPERIMENT_NAME=${DATASET}_${LR}_${ATTACK1}_${ATTACK2}_${EPS_MAX}_${NORM}
+
+      python ./attack_model.py $LOAD_ATTACK/test $MODEL data/result/$SAVE_RESULT/${EXPERIMENT_NAME}_$METRIC.csv\
+        $EXPERIMENT_NAME $METRIC\
+        --opt-model=sample_size=$SAMPLE_SIZE,init_prior=True\
+        --metric=$METRIC --load=$LOAD/weights.pkl\
+        --attack=${ATTACK2}
+    done
+  done
+done
+
+# We assume that between experiments we only change the norm and the dataset. 
+# Then "merge_$DATASET_$NORM.csv" is a unique name.
+python ./merge_csv.py data/result$SIGNED_EXT/$SAVE_RESULT/ data/result$SIGNED_EXT/merge/bar/norm=${NORM}/merge${SIGNED_EXT}_${DATASET}_${NORM}.csv

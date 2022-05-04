@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# Author: Guillaume VIDOT (AIRBUS SAS)
+#
+# This file is licensed under the license found in the
+# LICENSE file in the root directory of this source tree.
+
+DATASET_=("mnist_1_7" "mnist_4_9" "mnist_5_6" "fashion_sa_bo" "fashion_to_pu" "fashion_co_sh")
+SIGNED_=("True" "False")
+NORM_=("l2" "linf")
+
+for SIGNED in "${SIGNED_[@]}"; do
+    SIGNED_EXT=""
+    if [[ "$SIGNED" == "True" ]] 
+    then 
+        SIGNED_EXT="_signed"
+    fi
+    # We create the directory merge if it does not exists
+    mkdir -p data/result$SIGNED_EXT/merge/plot
+
+    for NORM in "${NORM_[@]}"; do
+        for DATASET in "${DATASET_[@]}"; do
+            if [[ "$NORM" == "l2" ]] 
+            then 
+                EPS_MAX="1"
+            else
+                EPS_MAX="0.1"
+            fi
+            run $DATASET $SIGNED $NORM $EPS_MAX
+        done
+
+        # We merge the result for all dataset and for one norm
+        python ./merge_csv.py data/result$SIGNED_EXT/merge/bar/norm=${NORM} data/result$SIGNED_EXT/merge/plot/merge_${NORM}.csv
+    done
+
+done
